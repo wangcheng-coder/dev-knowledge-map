@@ -1,0 +1,7 @@
+1 准备 new Child()
+3 父类构造器开始，马上调用可覆盖的 greet()
+4 子类 greet 被父类构造器调用，此时 name=null
+5 父类构造器结束
+6 子类字段 name 初始化
+7 子类构造器，name=ready
+8 创建完成，name=ready

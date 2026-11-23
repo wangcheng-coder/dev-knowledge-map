@@ -1,0 +1,7 @@
+开始创建 A
+开始创建 B
+从早期缓存取出正在创建的 A
+B.init 看见 A=true
+创建完成 B
+A.init 看见 B=true
+创建完成 A

@@ -1,0 +1,6 @@
+volatile 自增做完
+  期望 800000 实际 256127
+AtomicInteger 做完
+  期望 800000 实际 800000
+synchronized 做完
+  期望 800000 实际 800000

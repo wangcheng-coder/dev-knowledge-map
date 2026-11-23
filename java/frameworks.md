@@ -1,58 +1,76 @@
 # Java 框架
 
-框架把对象的创建、事务、HTTP 和远程调用从业务代码里抽走。抽走之后，执行顺序改由容器决定。读框架就是把这条隐式顺序找回来。
+框架把对象创建、事务和 HTTP 路由从业务方法里拿走之后，执行顺序由容器决定。这一页用两个小程序把最容易看错的两步跑出来：自调用不经过代理，循环依赖靠早期缓存。
 
-## Spring 容器
+## 自调用不经过代理
 
-容器从配置里读出 Bean 定义：类名、作用域、依赖和初始方法。刷新容器时创建单例、注入依赖、调用初始化回调，关闭时按相反顺序销毁。
+源码 [ProxySelfInvocation.java](../demos/src/ProxySelfInvocation.java)，输出 [ProxySelfInvocation.txt](../demos/transcripts/ProxySelfInvocation.txt)。
 
-单例之间如果通过属性互相引用，容器用三级缓存把「正在创建的对象」先暴露出去，等依赖注入完成再放进完成池。构造器参数里的循环依赖无法用这套提前暴露解决，因为对象还没构造出来。这种环要拆开。
+JDK 动态代理实现的是接口。调用方拿到的是代理对象。代理的 `invoke` 在调用实现对象的方法前后打印“开启事务”和“提交事务”。
 
-作用域除了单例还有原型等。把一个原型 Bean 直接注入进单例，注入只发生一次。需要每次都新建时，用方法注入或由提供者在调用时获取。
+调用 `proxy.create("A01")` 时：
 
-## AOP 与事务
+1. 调用进代理，打印“代理进入 create，开启事务”。
+2. 代理用反射调用 `OrderServiceImpl.create`。
+3. `create` 里面写的是 `save(id)`，也就是 `this.save(id)`。`this` 是实现对象，不是代理。
+4. `save` 直接执行，不再进入 `invoke`。所以没有第二对“开启事务 / 提交事务”。
+5. `create` 返回后，代理才打印“代理离开 create，提交事务”。
 
-面向切面通过代理在方法前后插入逻辑。对接口的代理常用 JDK 动态代理，对具体类的代理常用生成子类。调用必须经过代理对象，切面才会运行。同一个类内部的自调用走的是 `this`，代理看不见，事务注解也就不会生效。
+```text
+调用代理的 create:
+代理进入 create，开启事务
+  业务 create A01
+  业务 save A01
+代理离开 create，提交事务
+直接调用实现对象的 create:
+  业务 create A02
+  业务 save A02
+```
 
-`@Transactional` 在方法抛出运行时异常时回滚，受检异常默认提交。这个规则可以改，项目里要统一。事务传播决定加入当前事务还是另起一个。`REQUIRES_NEW` 会挂起外层、提交内层，内层提交后外层再失败，内层不会跟着回去。
+直接拿实现对象调用 `create` 时，代理完全不在栈上，事务打印一次都没有。Spring 的 `@Transactional` 也是代理。事务注解要生效，调用必须从外面打到代理上。同一个类里的自调用、以及拿到原始对象再调用，都不会经过代理。
 
-事务代理包住的方法里如果先做远程调用再写库，远程已经发出去而本地随后回滚，两侧就不一致。远程副作用放到事务成功之后，或做成可补偿的消息。
+对接口的代理常用 JDK 动态代理，对具体类的代理常用生成子类。默认情况下，运行时异常让事务回滚，受检异常不回滚。这个规则可以改，项目里要统一。`REQUIRES_NEW` 会提交内层事务；外层随后失败，内层不会跟着回去。
 
-## MVC
+事务里先做远程调用、再写数据库，远程已经发出去而本地随后回滚，两侧就不一致。远程副作用放到事务成功之后，或做成可以补偿的消息。
 
-Dispatcher 收到请求，按映射选择处理方法，参数解析器从路径、查询和正文里取出参数，返回值交给视图或消息转换器。REST 接口通常把对象交给 Jackson 写成 JSON。校验放在进入业务之前，业务方法收到的是已经通过约束的对象。
+## 循环依赖：先暴露未完成的对象
 
-过滤器、拦截器和控制器建议分层：过滤器和连接、编码、认证有关；拦截器和登录身份、权限有关；控制器做应用协议到业务调用的转换。
+源码 [MiniContainer.java](../demos/src/MiniContainer.java)，输出 [MiniContainer.txt](../demos/transcripts/MiniContainer.txt)。
 
-## Boot 的自动配置
+容器有两个池：`creating` 放已经 `new` 出来但还没注入完的对象，`ready` 放初始化结束的对象。创建 A 时：
 
-Spring Boot 在类路径上发现某些类时，注册对应的自动配置。配置属性把环境变量和文件绑定到类型化的对象上。排障时看条件是否命中：缺一个类或被用户自定义的 Bean 替代，自动配置会退开。启动日志里的条件报告是证据。
+1. `new ServiceA()`。A 的字段 `b` 仍是 `null`。立刻放进 `creating`。
+2. 给 A 注入 B，于是开始创建 B。
+3. `new ServiceB()`，放进 `creating`。
+4. B 要注入 A。A 不在 `ready` 里，但在 `creating` 里。容器把这个还没 `init` 的 A 交给 B。
+5. B 的 `init` 看见 A 不是 `null`，B 进入 `ready`。
+6. 回到 A，字段 `b` 现在有了，A 的 `init` 看见 B，A 进入 `ready`。
 
-可执行包把依赖打进去，用自己的加载器启动。镜像里的 JDK 版本要和编译目标一致。
+```text
+开始创建 A
+开始创建 B
+从早期缓存取出正在创建的 A
+B.init 看见 A=true
+创建完成 B
+A.init 看见 B=true
+创建完成 A
+```
 
-## 服务框架
+这只对“先构造、后设字段”成立。若 A 的构造器参数就是 B，B 的构造器参数又是 A，两个对象都还没有被 `new` 出来，早期缓存里没有可以提前给出去的引用。这种环要拆开。
 
-Dubbo 提供 Java 服务间的接口调用：注册中心公布地址，客户端按负载策略选择提供者，过滤器链处理超时、重试和上下文。重试只给幂等的方法。
+Spring 的单例池和三级缓存做的是同一类事，还要处理工厂对象和 AOP 代理的提前暴露。源码在 `spring-beans` 和 `spring-context`：https://github.com/spring-projects/spring-framework
 
-gRPC 的服务由接口定义生成桩代码，传输在 HTTP/2 上。和 Dubbo 一样，截止时间和取消要传过整条调用链，否则上游已经放弃，下游还在占用线程和连接。
+## 一次 HTTP 请求在框架里的顺序
 
-## 失败隔离
+和 [RequestPath](../demos/src/RequestPath.java) 的第 5 步往后接上：
 
-远程调用会失败、变慢、把调用方的线程耗尽。Resilience4j 把超时、限流、舱壁和熔断做成可组合的装饰器。熔断统计的是近期失败比例，打开后短时间内直接失败，避免继续冲击已经不健康的下游。阈值按下游的错误预算来定，而不是照抄示例里的数字。
+1. 过滤器处理连接、编码和认证。
+2. Dispatcher 用路径和 HTTP 方法选择控制器方法。
+3. 参数解析器从路径、查询和正文取出参数。Jackson 把 JSON 变成对象。校验失败就在进业务之前返回。
+4. 若方法上有事务代理，先取连接并开始事务，再进业务方法。
+5. 返回值交给消息转换器，写成响应正文。
+6. 方法正常结束则提交，运行时异常则按规则回滚，然后归还连接。
 
-## Web 容器
+Boot 的自动配置在类路径上发现某些类时注册默认 Bean。用户自己声明了同类型的 Bean，或少了一个类，条件就不成立，自动配置退开。启动时的条件报告是核对这件事的输出。自动配置代码在：https://github.com/spring-projects/spring-boot 的 `spring-boot-autoconfigure`。
 
-内嵌的或独立的 Servlet 容器接受连接，把 HTTP 解析成请求对象再进入 Spring。Tomcat 的连接器、线程池和 Spring 的业务线程是两段。慢业务会占住容器线程。虚拟线程或异步处理改变的是这段占用，不改变数据库和下游的容量。
-
-## 项目
-
-| 项目 | 先看什么 | 地址 |
-| --- | --- | --- |
-| Spring Framework | `spring-context`、`spring-aop`、`spring-tx`、`spring-webmvc` | https://github.com/spring-projects/spring-framework |
-| Spring Boot | `spring-boot-project/spring-boot-autoconfigure` | https://github.com/spring-projects/spring-boot |
-| Dubbo | 注册、集群、协议 | https://github.com/apache/dubbo |
-| gRPC Java | 服务定义如何变成调用 | https://github.com/grpc/grpc-java |
-| Tomcat | 连接器与请求处理 | https://github.com/apache/tomcat |
-| Jackson | JSON 与 Java 对象的转换 | https://github.com/FasterXML/jackson-databind |
-
-阅读目标：拿一个带事务的 HTTP 接口，按真实调用顺序列出过滤器、代理、业务、提交和序列化，并标出哪一步失败会回滚。
+服务框架上的超时和重试只给幂等的方法。Dubbo 的注册、集群和协议在 https://github.com/apache/dubbo 。gRPC 的桩和传输在 https://github.com/grpc/grpc-java 。Tomcat 的连接器和线程池在 https://github.com/apache/tomcat 。JSON 转换在 https://github.com/FasterXML/jackson-databind 。调用失败时的超时、限流和熔断可以套在客户端外面，Resilience4j 把这些做成可组合的装饰器：https://github.com/resilience4j/resilience4j 。

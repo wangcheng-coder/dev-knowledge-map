@@ -1,0 +1,3 @@
+两个加载器得到的 Class 是同一个对象: false
+名字都是: LoadedTwice
+第二个加载器的类型能否接纳第一个的实例: false

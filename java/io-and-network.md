@@ -1,48 +1,74 @@
 # Java I/O 与网络
 
-Java 的 I/O 是对操作系统文件描述符和套接字的封装。阻塞与否、缓冲区放在堆内还是堆外、事件循环由谁驱动，决定了一个服务能撑住多少连接。TCP 字节流和 `epoll` 的背景在 [网络](../network/README.md)。
+网络上的字节没有消息边界。这一页先用 `ByteBuffer` 的三个下标把“读模式”和“写模式”走完，再用一个长度前缀解码器把半包拼起来。TCP 确认号的数字过程在 [网络](../network/README.md)。
 
-## 流与通道
+## Buffer 的 position、limit、capacity
 
-`java.io` 的流是阻塞的。读调用在内核把数据准备好之前不返回。缓冲流把多次小读取合成一次系统调用。
+源码 [BufferIndices.java](../demos/src/BufferIndices.java)，输出 [BufferIndices.txt](../demos/transcripts/BufferIndices.txt)。
 
-NIO 用 `Channel` 表示到实体的连接，用 `Buffer` 承载字节。缓冲区有位置、界限和容量。读之前要先把写模式翻转成读模式，用完要清空，否则下一轮从错误的位置继续。
+`ByteBuffer.allocate(8)` 得到一块 8 字节的堆内缓冲。三个下标的含义是：
 
-`Selector` 一个线程登记很多通道。通道就绪时选择操作返回，线程只处理这些通道。这和内核的多路复用是同一模型。选择操作返回的是就绪集合，处理必须快，长时间计算要交给别的线程，否则所有连接的延迟一起变长。
+- `capacity` 是这块内存的长度，分配之后不变。
+- `position` 是下一次读或写下标。
+- `limit` 是不能越过的位置。`remaining` 等于 `limit - position`。
 
-## 堆内缓冲与直接缓冲
+写入 `a`、`b`、`c` 时缓冲处于写模式，`limit` 等于 `capacity`。每 `put` 一个字节，`position` 加 1。
 
-堆内 `ByteBuffer` 的字节在 Java 堆里，和本地调用之间通常要再拷贝一次。直接缓冲区的内存在堆外，本地 I/O 可以少一次拷贝，分配和回收更贵，也不受普通对象分配路径控制。生命周期要明确：谁分配，谁在不用时释放。
+```text
+分配 position=0 limit=8 capacity=8 remaining=8
+写入 abc position=3 limit=8 capacity=8 remaining=5
+flip 后准备读 position=0 limit=3 capacity=8 remaining=3
+读完 abc position=3 limit=3 capacity=8 remaining=0
+clear 后可以重新写 position=0 limit=8 capacity=8 remaining=8
+```
 
-## 零拷贝这个词在 Java 里指什么
+`flip` 做两件事：把 `limit` 设成当前 `position`（3，表示有效数据只有 3 字节），再把 `position` 设回 0。之后 `get` 只会读到 `abc`，不会把后面 5 个未写的 0 也读出来。
 
-`FileChannel.transferTo` 可以把文件数据从页缓存送到套接字，减少用户态来回拷贝。`MappedByteBuffer` 把文件映射到地址空间，访问内存即访问文件页。它们减少的是拷贝次数，磁盘和网卡仍然要真正搬数据。
+读完以后 `position == limit`，再 `get` 会抛 `BufferUnderflowException`。`clear` 不是把字节擦成 0，它只把 `position` 设为 0、`limit` 设回 `capacity`，让同一块内存可以重新写。旧的 `abc` 还在内存里，直到被新写入覆盖。
 
-## Netty
+堆内缓冲和本地 I/O 之间通常还要再拷贝一次。`allocateDirect` 的内存在堆外，本地调用可以少这一次，分配和释放更贵。谁分配，谁在不用时释放。
 
-Netty 在 NIO 之上提供可用的服务器结构：
+## 长度前缀：三次到达才拼出两条消息
 
-- 事件循环组：接受连接的循环，和处理已建立连接的循环，可以分开。
-- `ByteBuf`：自己的缓冲区，读写索引分开，池化后减少分配。
-- 流水线：解码、业务、编码按顺序挂在通道上。
-- 解码器要处理半包和粘包。字节流没有消息边界，数据可能分多次就绪。
+源码 [FrameDecoder.java](../demos/src/FrameDecoder.java)，输出 [FrameDecoder.txt](../demos/transcripts/FrameDecoder.txt)。
 
-事件循环线程上不要做阻塞的数据库和远程调用。这类工作放到单独的执行器，完成后再把写操作调度回该通道所属的事件循环。
+协议规定：4 字节大端长度，后面紧跟那么多个字节的正文。解码器自己保存 `pending`。每一次 `push`：
 
-## HTTP 与 RPC 之下仍然是连接
+1. 把 `pending` 和这次的字节接成 `all`。
+2. 若剩下的字节不足 4 个，长度还没到齐，整段留在 `pending`。
+3. 读出长度后，若剩下的字节不足 `4 + 长度`，正文还没到齐，同样整段留下，不交出半条消息。
+4. 够了才切出一条字符串，`cursor` 前进，继续看后面还有没有下一条。
+5. `cursor` 之后的字节成为新的 `pending`。
 
-HTTP 客户端把请求写成字节、读完响应。连接池复用 TCP 连接，避免每次握手。超时要分成连接超时、读取超时和调用整体超时，否则一个不返回的对端会占住池里的连接。
+三次调用的字节是：
 
-gRPC 在 HTTP/2 上承载多路流，用 Protobuf 描述消息。流控和截止时间是协议的一部分，客户端重试必须配合幂等。
+1. `00 00 00 05 68 65`。长度 5 已经看见，正文只到了 `h`、`e` 两个字节。不够 5，一条都不交出，6 字节全部留下。
+2. `6c 6c 6f 00 00`。接上之后是 `00 00 00 05 68 65 6c 6c 6f 00 00`。前 9 字节正好是长度 5 的 `hello`。剩下 `00 00` 留着。
+3. `00 03 48 69 21`。接上 `00 00` 变成 `00 00 00 03 48 69 21`，长度 3 的 `Hi!`。缓存变 0。
 
-## 项目
+```text
+收到 6 字节，解出 []，还缓存 6 字节
+收到 5 字节，解出 [hello]，还缓存 2 字节
+收到 5 字节，解出 [Hi!]，还缓存 0 字节
+```
 
-| 项目 | 先看什么 | 地址 |
-| --- | --- | --- |
-| OpenJDK NIO | `src/java.base/share/classes/java/nio` 与 `sun.nio.ch` | https://github.com/openjdk/jdk |
-| Netty | `transport`、`buffer`、`codec-http` | https://github.com/netty/netty |
-| gRPC Java | stub 与传输层 | https://github.com/grpc/grpc-java |
-| Protocol Buffers | Java 运行时如何把消息编成字节 | https://github.com/protocolbuffers/protobuf |
-| Netty 所依赖的模型可对照 nginx | 事件循环与缓冲 | https://github.com/nginx/nginx |
+第二条消息的长度高位字节在第二次到达，低位和正文在第三次到达。解码器不能假设一次 `read` 等于一条消息，也不能假设一次 `read` 只含一条消息。
 
-阅读目标：给定一个自定义二进制协议，能说出帧长在缓冲区里不完整时解码器应该做什么；能指出哪段代码跑在事件循环上。
+## 事件循环里哪些事不能做
+
+一个线程阻塞在 `read` 上就只能守一条连接。`Selector` 登记很多通道，内核在其中有通道就绪时返回。处理就绪事件的线程要快。数据库和远程调用放到别的执行器，完成后再把写操作调度回这个通道所属的线程。否则这次慢调用期间，其余连接的字节都停在缓冲区里。
+
+Netty 把这件事分成：接受连接的事件循环、处理已建立连接的事件循环、`ByteBuf` 的读写下标、以及按顺序挂上的解码器和业务处理器。解码器要处理的就是上面这种半包。源码从 `transport`、`buffer`、`codec` 看起：https://github.com/netty/netty
+
+`FileChannel.transferTo` 把文件页从页缓存送到套接字，减少用户态来回拷贝。磁盘和网卡仍然要搬这些字节。
+
+## 对照
+
+| 步骤 | 演示或仓库 |
+| --- | --- |
+| 三个下标 | [BufferIndices.txt](../demos/transcripts/BufferIndices.txt) |
+| 半包 | [FrameDecoder.txt](../demos/transcripts/FrameDecoder.txt) |
+| TCP 确认号 | [TcpHandshake.txt](../demos/transcripts/TcpHandshake.txt) |
+| JDK NIO | https://github.com/openjdk/jdk 的 `java/nio` 与 `sun/nio/ch` |
+| gRPC Java | https://github.com/grpc/grpc-java |
+| Protobuf 的 Java 编码 | https://github.com/protocolbuffers/protobuf |

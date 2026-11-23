@@ -1,0 +1,5 @@
+分配 position=0 limit=8 capacity=8 remaining=8
+写入 abc position=3 limit=8 capacity=8 remaining=5
+flip 后准备读 position=0 limit=3 capacity=8 remaining=3
+读完 abc position=3 limit=3 capacity=8 remaining=0
+clear 后可以重新写 position=0 limit=8 capacity=8 remaining=8

@@ -1,0 +1,4 @@
+两个 List 的运行时类相同: true
+运行时类名: java.util.ArrayList
+字节码里保留的父类签名: mapdemo.GenericsErasure$Box<java.lang.String>
+签名参数: java.lang.String

@@ -1,0 +1,5 @@
+放入后 get(原对象)=订单 桶位hash=1
+改字段后 get(原对象)=null 新hash=2
+用新的 Key(1) 查找=null
+用新的 Key(2) 查找=null
+map.size 仍是 1，条目还在旧桶里

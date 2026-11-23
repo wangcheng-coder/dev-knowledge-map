@@ -1,0 +1,8 @@
+方法 add(II)I
+max_stack=2 max_locals=3 code_length=6
+   0: iload_0
+   1: iload_1
+   2: iadd
+   3: istore_2
+   4: iload_2
+   5: ireturn

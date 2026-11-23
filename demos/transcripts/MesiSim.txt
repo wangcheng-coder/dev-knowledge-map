@@ -1,0 +1,10 @@
+初始，两个核都没有这行缓存
+  Core0=INVALID  Core1=INVALID
+Core0 读，内存把这一行送进来，只有它持有干净副本
+  Core0=EXCLUSIVE  Core1=INVALID
+Core1 也读，两个核都是共享的干净副本
+  Core0=SHARED  Core1=SHARED
+Core0 写，Core1 的副本作废，Core0 成为唯一的脏副本
+  Core0=MODIFIED  Core1=INVALID
+Core1 再读，Core0 先把脏数据写回，两边重新共享
+  Core0=SHARED  Core1=SHARED
